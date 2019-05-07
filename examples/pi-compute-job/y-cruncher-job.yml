@@ -1,0 +1,45 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pi-crunch
+spec:
+  selector: {}
+  template:
+    metadata:
+      name: pi-crunch
+    spec:
+      initContainers:
+      - name: init-job
+        image: busybox:1.30
+        command:
+          - mkdir
+          - -p
+          - /mnt/job-output
+        volumeMounts:
+          - mountPath: "/mnt"
+            name: pi-store
+      containers:
+        - name: pi-crunch
+          image: 'docker-registry.default.svc:5000/neic2019/y-cruncher:v0.7.7.9501'
+          workingDir: "/mnt/job-output"
+          command:
+            - /opt/y-cruncher/y-cruncher
+            - bench
+            - 50m
+            - -TD:2
+          volumeMounts:
+            - mountPath: "/mnt"
+              name: pi-store
+          resources:
+            limits:
+              cpu: 2
+              memory: 8Gi
+            requests:
+              cpu: 2
+              memory: 4Gi
+      volumes:
+        - name: pi-store
+          persistentVolumeClaim:
+            claimName: pi-store
+      restartPolicy: Never
