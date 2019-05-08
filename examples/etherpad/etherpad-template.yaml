@@ -1,0 +1,377 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: etherpad
+  annotations:
+    openshift.io/display-name: Etherpad
+    iconClass: fa fa-file-text-o
+    description: |
+      Deploys a public shared Notepad on OpenShift.
+      For more information regarding this setup, see: https://github.com/coderefinery/rahti-neic2019-workshop
+
+      This template automatically deploys and configures Etherpad with a MongoDB backend. 
+      The data is persisted via a PVC which is attached to the MongoDB instance. 
+      The Etherpad deployment uses a combination of environment variables and a ConfigMap for configuration.
+    openshift.io/documentation-url: https://github.com/ether/etherpad-lite
+    openshift.io/provider-display-name: CSC
+    tags: etherpad, mongodb
+objects:
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    labels:
+      app: ${NAME}
+    name: ${NAME}-mongodb
+  stringData:
+    database-admin-password: ${DB_ADMIN_PASSWORD}
+    database-name: ${DB_NAME}
+    database-password: ${DB_PASSWORD}
+    database-user: ${DB_USERNAME}
+
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      app: ${NAME}
+    name: ${NAME}-mongodb
+  spec:
+    replicas: 1
+    selector:
+      name: ${NAME}-mongodb
+    template:
+      metadata:
+        labels:
+          name: ${NAME}-mongodb
+      spec:
+        containers:
+        - capabilities: {}
+          env:
+          - name: MONGODB_USER
+            valueFrom:
+              secretKeyRef:
+                key: database-user
+                name: ${NAME}-mongodb
+          - name: MONGODB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-password
+                name: ${NAME}-mongodb
+          - name: MONGODB_ADMIN_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-admin-password
+                name: ${NAME}-mongodb
+          - name: MONGODB_DATABASE
+            valueFrom:
+              secretKeyRef:
+                key: database-name
+                name: ${NAME}-mongodb
+          image: 'centos/mongodb-32-centos7'
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            initialDelaySeconds: 30
+            tcpSocket:
+              port: 27017
+            timeoutSeconds: 1
+          name: mongodb
+          ports:
+          - containerPort: 27017
+            protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -i
+              - -c
+              - mongo 127.0.0.1:27017/$MONGODB_DATABASE -u $MONGODB_USER -p $MONGODB_PASSWORD
+                --eval="quit()"
+            initialDelaySeconds: 3
+            timeoutSeconds: 1
+          volumeMounts:
+          - mountPath: /var/lib/mongodb/data
+            name: ${NAME}-data
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        volumes:
+        - name: ${NAME}-data
+          persistentVolumeClaim:
+            claimName: ${NAME}-mongodb
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: ${NAME}
+    name: ${NAME}-mongodb
+  spec:
+    ports:
+    - name: mongo
+      nodePort: 0
+      port: 27017
+      protocol: TCP
+      targetPort: 27017
+    selector:
+      name: ${NAME}-mongodb
+    sessionAffinity: None
+    type: ClusterIP
+  status:
+    loadBalancer: {}
+
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    labels:
+      app: ${NAME}
+    name: ${NAME}-mongodb
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: 1Gi
+
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    annotations:
+      template.alpha.openshift.io/wait-for-ready: "true"
+    labels:
+      app: ${NAME}
+    name: ${NAME}
+  spec:
+    replicas: 1
+    selector:
+      app: ${NAME}
+    template:
+      metadata:
+        labels:
+          app: ${NAME}
+      spec:
+        containers:
+          - image: docker-registry.rahti.csc.fi/rahti-docker-prod/etherpad:1.7.5
+            imagePullPolicy: Always
+            name: ${NAME}
+            ports:
+              - containerPort: 9001
+                protocol: TCP
+            env:
+              - name: DB_USERNAME
+                valueFrom:
+                  secretKeyRef:
+                    name: ${NAME}-mongodb
+                    key: database-user
+              - name: DB_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: ${NAME}-mongodb
+                    key: database-password
+              - name: DB_IP
+                value: ${NAME}-mongodb
+              - name: DB_PORT
+                value: ${DB_PORT}
+              - name: DB_NAME
+                valueFrom:
+                  secretKeyRef:
+                    name: ${NAME}-mongodb
+                    key: database-name
+              - name: ADMIN_PASSWORD
+                value: ${ADMIN_PASSWORD}
+            readinessProbe:
+              failureThreshold: 5
+              httpGet:
+                path: /
+                port: 9001
+                scheme: HTTP
+              initialDelaySeconds: 60
+              periodSeconds: 10
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /
+                port: 9001
+                scheme: HTTP
+              initialDelaySeconds: 60
+              periodSeconds: 10
+            volumeMounts:
+              - mountPath: /opt/app-root/src/settings.json
+                subPath: settings.json
+                name: ${NAME}-settings
+        volumes:
+          - configMap:
+              name: ${NAME}-settings
+            name: ${NAME}-settings
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: ${NAME}
+    name: ${NAME}
+  spec:
+    ports:
+    - name: ${NAME}
+      port: 9001
+      protocol: TCP
+      targetPort: 9001
+    selector:
+      app: ${NAME}
+
+- apiVersion: v1
+  kind: Route
+  metadata:
+    labels:
+      app: ${NAME}
+    name: ${NAME}
+  spec:
+    to:
+      name: ${NAME}
+
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: ${NAME}-settings
+    labels:
+      app: ${NAME}
+  data:
+    settings.json: |
+      {
+      "title": "Etherpad",
+
+      "skinName": "no-skin",
+
+      "ip": "0.0.0.0",
+      "port" : 9001,
+
+      "showSettingsInAdminPage" : true,
+
+      "dbType" : "mongodb",
+      "dbSettings" : {
+                       "user"    : "DB_USERNAME",
+                       "host"    : "DB_IP",
+                       "port"    : DB_PORT,
+                       "password": "DB_PASSWORD",
+                       "dbname": "DB_NAME"
+                     },
+      "users": {
+        "admin": {
+          "password": "ADMIN_PASSWORD",
+          "is_admin": true
+        }
+      },
+
+      "defaultPadText" : "Welcome to Etherpad!\n\nThis pad text is synchronized as you type, so that everyone viewing this page sees the same text. This allows you to collaborate seamlessly on documents!\n\nGet involved with Etherpad at http:\/\/etherpad.org\n",
+
+      "padOptions": {
+        "noColors": false,
+        "showControls": true,
+        "showChat": true,
+        "showLineNumbers": true,
+        "useMonospaceFont": false,
+        "userName": false,
+        "userColor": false,
+        "rtl": false,
+        "alwaysShowChat": false,
+        "chatAndUsers": false,
+        "lang": "en-gb"
+      },
+
+      "padShortcutEnabled" : {
+        "altF9"     : true, /* focus on the File Menu and/or editbar */
+        "altC"      : true, /* focus on the Chat window */
+        "cmdShift2" : true, /* shows a gritter popup showing a line author */
+        "delete"    : true,
+        "return"    : true,
+        "esc"       : true, /* in mozilla versions 14-19 avoid reconnecting pad */
+        "cmdS"      : true, /* save a revision */
+        "tab"       : true, /* indent */
+        "cmdZ"      : true, /* undo/redo */
+        "cmdY"      : true, /* redo */
+        "cmdI"      : true, /* italic */
+        "cmdB"      : true, /* bold */
+        "cmdU"      : true, /* underline */
+        "cmd5"      : true, /* strike through */
+        "cmdShiftL" : true, /* unordered list */
+        "cmdShiftN" : true, /* ordered list */
+        "cmdShift1" : true, /* ordered list */
+        "cmdShiftC" : true, /* clear authorship */
+        "cmdH"      : true, /* backspace */
+        "ctrlHome"  : true, /* scroll to top of pad */
+        "pageUp"    : true,
+        "pageDown"  : true
+      },
+      "suppressErrorsInPadText" : false,
+      "requireSession" : false,
+      "editOnly" : false,
+      "sessionNoPassword" : false,
+      "minify" : true,
+      "maxAge" : 21600, // 60 * 60 * 6 = 6 hours
+      "abiword" : null,
+      "soffice" : null,
+      "tidyHtml" : null,
+      "allowUnknownFileEnds" : true,
+      "requireAuthentication" : false,
+      "requireAuthorization" : false,
+      "trustProxy" : false,
+      "disableIPlogging" : false,
+      "automaticReconnectionTimeout" : 0,
+      "scrollWhenFocusLineIsOutOfViewport": {
+        "percentage": {
+          "editionAboveViewport": 0,
+          "editionBelowViewport": 0
+        },
+        "duration": 0,
+        "scrollWhenCaretIsInTheLastLineOfViewport": false,
+        "percentageToScrollWhenUserPressesArrowUp": 0
+      },
+
+      "socketTransportProtocols" : ["xhr-polling", "jsonp-polling", "htmlfile"],
+      "loadTest": false,
+      "loglevel": "INFO",
+      "logconfig" :
+        { "appenders": [
+            {
+              "type": "console"
+            }
+          ]
+        }
+      }
+
+parameters:
+- name: NAME
+  displayName: Name
+  description: Name of the deployment
+  required: true
+  value: etherpad
+- name: ADMIN_PASSWORD
+  displayName: Etherpad Admin Password
+  description: Admin password for the etherpad admin
+  from: '[a-zA-Z0-9]{16}'
+  generate: expression
+  required: true
+- name: DB_NAME
+  displayName: Database Name
+  description: Database Name
+  value: ether
+  required: true
+- name: DB_USERNAME
+  displayName: Database User ID
+  description: Database User ID
+  value: ether
+  required: true
+- name: DB_PASSWORD
+  displayName: Database Password
+  description: Database Password
+  from: '[a-zA-Z0-9]{16}'
+  generate: expression
+  required: true
+- name: DB_ADMIN_PASSWORD
+  displayName: MongoDB Admin Password
+  description: Password for the database admin user.
+  from: '[a-zA-Z0-9]{16}'
+  generate: expression
+  required: true
+- name: DB_PORT
+  displayName: Database Port
+  description: Database Port
+  value: "27017"
+  required: true
